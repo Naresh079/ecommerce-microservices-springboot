@@ -6,52 +6,37 @@ import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
 
-import com.learner.orderservice.client.InventoryClient;
-import com.learner.orderservice.client.PaymentClient;
-import com.learner.orderservice.kafka.OrderEventProducer;
+import com.learner.orderservice.entity.Order;
+import com.learner.orderservice.entity.OutboxEvent;
+import com.learner.orderservice.repository.OrderRepository;
+import com.learner.orderservice.repository.OutBoxRepository;
 
-import io.github.resilience4j.circuitbreaker.annotation.CircuitBreaker;
+import jakarta.transaction.Transactional;
 
 @RestController
 @RequestMapping("/order")
 public class OrderController {
 
     @Autowired
-    private InventoryClient inventoryClient;
+    private OrderRepository orderRepository;
 
     @Autowired
-    private PaymentClient paymentClient;
-    
-    @Autowired
-    private OrderEventProducer orderEventProducer;
+    private OutBoxRepository outboxEventRepository;
 
     @GetMapping("/place/{productId}")
-    @CircuitBreaker(name = "inventoryService", fallbackMethod = "fallbackResponse")
+    @Transactional
     public String placeOrder(@PathVariable String productId) {
-        
-        // Step 1 — Check inventory
-        String stockStatus = inventoryClient.checkStock(productId);
-        if (!stockStatus.equals("IN_STOCK")) {
-            return "Order failed — product out of stock";
-        }
-        System.out.println("Step 1 passed — stock available");
 
-        // Step 2 — Process payment
-        String paymentStatus = paymentClient.processPayment(productId);
-        if (!paymentStatus.equals("PAYMENT_SUCCESS")) {
-            // Compensating transaction
-            System.out.println("Payment failed — rolling back inventory");
-            return "Order failed — payment unsuccessful. Inventory restored.";
-        }
-        System.out.println("Step 2 passed — payment successful");
-        
-        orderEventProducer.publishOrderCancelled("Order placed for product: " + productId);
+        // Save order to DB
+        Order order = new Order(productId, "PENDING");
+        orderRepository.save(order);
+        System.out.println("Order saved to DB: " + productId);
 
-        // Step 3 — All good
-        return "Order CONFIRMED for: " + productId;
-    }
+        // Save event to Outbox in SAME transaction
+        OutboxEvent event = new OutboxEvent("ORDER_CREATED", productId);
+        outboxEventRepository.save(event);
+        System.out.println("Outbox event saved: " + productId);
 
-    public String fallbackResponse(String productId, Exception e) {
-        return "Service is down. Please try again later.";
+        return "Order request received for: " + productId + ". Processing asynchronously.";
     }
 }
